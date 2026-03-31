@@ -1,28 +1,33 @@
-# Dependencies — never push these (huge folders)
+# Node
 node_modules/
+npm-debug.log
+yarn-error.log
 
-# Environment variables — never push (contains secrets)
+# Environment files
 .env
+.env.local
+.env.*.local
 
 # Logs
 logs/
 *.log
-npm-debug.log*
 
 # OS files
 .DS_Store
 Thumbs.db
 
-# Build output
+# Build
 dist/
 build/
 
-# Upload folder (temporary files)
-uploads/
-
-# Python
+# Python (RL folder)
 __pycache__/
 *.pyc
-*.pyo
-.env
 venv/
+
+# IDE
+.vscode/
+.idea/
+
+# Coverage
+coverage/
