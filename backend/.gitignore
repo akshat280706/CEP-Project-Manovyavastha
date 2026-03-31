@@ -1,0 +1,28 @@
+# Dependencies — never push these (huge folders)
+node_modules/
+
+# Environment variables — never push (contains secrets)
+.env
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Build output
+dist/
+build/
+
+# Upload folder (temporary files)
+uploads/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.env
+venv/
