@@ -395,6 +395,10 @@ def _retry_score(task: dict) -> float:
     return 0.0
 
 
+# slack threshold below which deadline urgency overrides LLM sequence
+URGENT_SLACK_HOURS = 1.5
+
+
 def score_task(
     task: dict,
     prev_task_type: str | None,
@@ -403,21 +407,30 @@ def score_task(
     virtual_now: datetime,
 ) -> float:
     slack            = _compute_slack(task, virtual_now)
-    deadline_score   = 1 / max(slack, 0.25)
     cognitive_score  = _cognitive_fit_score(task, user_state)
     retry_score      = _retry_score(task)
     starvation_score = task.get("priority_boost", 0) * 0.3
     context_score    = _context_switch_score(task, prev_task_type, user_id)
     time_score       = time_preference_score(task, user_id, virtual_now)
 
-    return (
-        deadline_score   * 3.0 +
+    secondary = (
         cognitive_score  * 1.0 +
         retry_score      * 1.5 +
         starvation_score * 1.0 +
         context_score    * 1.0 +
-        time_score       * 0.5   # low weight — nudge only, never overrides prerequisites
+        time_score       * 0.5
     )
+
+    if slack < URGENT_SLACK_HOURS:
+        # deadline is tight — urgency overrides LLM sequence
+        primary = (1 / max(slack, 0.25)) * 3.0
+    else:
+        # plenty of time — respect LLM prerequisite order
+        # lower llm_order index = higher score
+        llm_order = task.get("llm_order", 999)
+        primary = (1 / (llm_order + 1)) * 3.0
+
+    return primary + secondary
 
 
 def run_selector(
