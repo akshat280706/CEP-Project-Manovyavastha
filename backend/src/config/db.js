@@ -8,9 +8,7 @@ const connectDB = async () => {
       serverSelectionTimeoutMS: 5000,
       socketTimeoutMS: 45000,
     })
-
     logger.info(`MongoDB connected: ${conn.connection.host}`)
-
     // Handle connection events
     mongoose.connection.on('disconnected', () => {
       logger.warn('MongoDB disconnected. Attempting to reconnect...')
@@ -25,5 +23,4 @@ const connectDB = async () => {
     process.exit(1)
   }
 }
-
 module.exports = connectDB
