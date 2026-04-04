@@ -1,6 +1,6 @@
-const llmService = require('./llm.service')
-const { extractTextFromFile, prepareForLLM } = require('../../utils/pdfExtractor')
-const logger = require('../../utils/logger')
+const llmService = require('./llm.service.js')
+const { extractTextFromFile, prepareForLLM } = require('../../utils/pdfExtractor.js')
+const logger = require('../../utils/logger.js')
 
 const decompose = async (req, res, next) => {
   try {

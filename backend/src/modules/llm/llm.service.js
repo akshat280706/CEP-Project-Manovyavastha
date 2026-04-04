@@ -1,5 +1,5 @@
-const groqClient = require('../../config/groq')
-const logger = require('../../utils/logger')
+const groqClient = require('../../config/groq.js')
+const logger = require('../../utils/logger.js')
 
 const SYSTEM_PROMPT = `You are a task decomposition engine for MANOVYAVASTHA, a cognitive-aware productivity scheduler.
 

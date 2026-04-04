@@ -1,6 +1,6 @@
-const Goal = require('../../models/Goal')
-const Task = require('../../models/Task')
-const logger = require('../../utils/logger')
+const Goal = require('../../models/Goal.js')
+const Task = require('../../models/Task.js')
+const logger = require('../../utils/logger.js')
 
 const resolveDependencyName = (task, allTasks) => {
   if (!task.dependsOn || task.dependsOn.length === 0) return null

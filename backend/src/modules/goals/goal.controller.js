@@ -1,5 +1,5 @@
-const goalService = require('./goal.service')
-const logger = require('../../utils/logger')
+const goalService = require('./goal.service.js')
+const logger = require('../../utils/logger.js')
 
 const confirmGoal = async (req, res, next) => {
   try {

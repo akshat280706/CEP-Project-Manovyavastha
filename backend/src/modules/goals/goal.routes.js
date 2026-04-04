@@ -1,7 +1,7 @@
 const express = require('express')
 const router  = express.Router()
-const auth    = require('../../middleware/auth.middleware')
-const goalController = require('./goal.controller')
+const auth    = require('../../middleware/auth.middleware.js')
+const goalController = require('./goal.controller.js')
 
 router.post('/confirm',       auth, goalController.confirmGoal)
 router.get('/my',             auth, goalController.getMyGoals)
