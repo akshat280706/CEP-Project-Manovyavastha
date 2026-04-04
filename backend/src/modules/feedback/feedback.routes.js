@@ -1,7 +1,7 @@
 const express  = require('express')
 const router   = express.Router()
-const auth     = require('../../middleware/auth.middleware')
-const feedbackController = require('./feedback.controller')
+const auth     = require('../../middleware/auth.middleware.js')
+const feedbackController = require('./feedback.controller.js')
 
 router.post('/submit', auth, feedbackController.submitFeedback)
 

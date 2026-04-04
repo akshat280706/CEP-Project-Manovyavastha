@@ -23,16 +23,40 @@ app.use(express.urlencoded({ extended: true, limit: '10mb' }))
 app.set('redis', redisClient)
 
 // Auto load all route modules
-const modules = ['auth', 'llm', 'goals', 'schedule', 'feedback']
+// const modules = ['auth', 'llm', 'goals', 'schedule', 'feedback']
+// modules.forEach(mod => {
+//   try {
+//     const router = require(`./src/modules/${mod}/${mod}.routes`)
+//     app.use(`/api/${mod}`, router)
+//     logger.info(`Loaded module: ${mod}`)
+//   } catch (err) {
+//   logger.warn(`Failed to load module: ${mod}`)
+//   console.error(err)
+// }
+//   // } catch (err) {
+//   //   logger.warn(`Module not found: ${mod} — skipping`)
+//   // }
+// })
+
+const modules = [
+  { name: 'auth', file: 'auth' },
+  { name: 'llm', file: 'llm' },
+  { name: 'goals', file: 'goal' }, // 👈 FIX HERE
+  { name: 'schedule', file: 'schedule' },
+  { name: 'feedback', file: 'feedback' }
+]
+
 modules.forEach(mod => {
   try {
-    const router = require(`./src/modules/${mod}/${mod}.routes`)
-    app.use(`/api/${mod}`, router)
-    logger.info(`Loaded module: ${mod}`)
+    const router = require(`./src/modules/${mod.name}/${mod.file}.routes`)
+    app.use(`/api/${mod.name}`, router)
+    logger.info(`Loaded module: ${mod.name}`)
   } catch (err) {
-    logger.warn(`Module not found: ${mod} — skipping`)
+    logger.warn(`Failed to load module: ${mod.name}`)
+    console.error(err.message)
   }
 })
+
 
 // Health check
 app.get('/', (req, res) => {

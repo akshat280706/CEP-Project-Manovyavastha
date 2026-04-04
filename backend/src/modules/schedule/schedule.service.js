@@ -1,6 +1,6 @@
-const Task             = require('../../models/Task')
-const ScheduledSession = require('../../models/ScheduledSession')
-const logger           = require('../../utils/logger')
+const Task             = require('../../models/Task.js')
+const ScheduledSession = require('../../models/ScheduleSession.js')
+const logger           = require('../../utils/logger.js')
 
 const getTodaySchedule = async (userId) => {
   const today    = new Date()

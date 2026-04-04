@@ -1,5 +1,6 @@
 const Redis = require('ioredis')
-const logger = require('../utils/logger')
+const logger = require('../utils/logger.js')
+// const logger = require('../utils/logger')
 
 const redisClient = new Redis(process.env.REDIS_URL, {
   maxRetriesPerRequest: null,

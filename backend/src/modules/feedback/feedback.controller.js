@@ -1,4 +1,4 @@
-const feedbackService = require('./feedback.service')
+const feedbackService = require('./feedback.service.js')
 
 const submitFeedback = async (req, res, next) => {
   try {

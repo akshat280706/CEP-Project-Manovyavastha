@@ -1,6 +1,6 @@
-const ScheduledSession = require('../../models/ScheduledSession')
-const Task             = require('../../models/Task')
-const logger           = require('../../utils/logger')
+const ScheduledSession = require('../../models/ScheduleSession.js')
+const Task             = require('../../models/Task.js')
+const logger           = require('../../utils/logger.js')
 
 const FEEDBACK_ROUTING = {
   F1: { primary: 'duration',        secondary: null },
