@@ -14,8 +14,6 @@ const taskSchema = new mongoose.Schema(
       required: true,
       index: true
     },
-
-    // LLM generated fields
     title: {
       type: String,
       required: [true, 'Task title is required'],
@@ -72,48 +70,41 @@ const taskSchema = new mongoose.Schema(
       enum: ['foundation', 'development', 'intensive', 'maintenance'],
       default: 'foundation'
     },
-
-    // NEW FIELD — added for RL format requirement
-    // The subject/topic this task belongs to
-    // e.g. "Graph Theory", "Dynamic Programming", "React Hooks"
     topicName: {
       type: String,
       trim: true,
       default: ''
     },
-
-    // Array of orderIndexes this task depends on
     dependsOn: {
       type: [Number],
       default: []
     },
-
-    // Task status
     status: {
       type: String,
       enum: [
-        'pending',
-        'scheduled',
-        'in_progress',
-        'completed',
-        'failed',
-        'skipped',
-        'blocked'
+        'pending', 'scheduled', 'in_progress',
+        'completed', 'failed', 'skipped', 'blocked'
       ],
       default: 'pending'
     },
 
-    // Filled when task completes
-    actualDurationMin: {
-      type: Number,
-      default: null
+    // RL fields — needed by orchestrator.py
+    source: {
+      type: String,
+      enum: ['new', 'pending', 'failed'],
+      default: 'new'
     },
-    completedAt: {
-      type: Date,
+    attemptCount: {
+      type: Number,
+      default: 0
+    },
+    lastFailedReason: {
+      type: String,
+      enum: ['F1', 'F2', 'F3', 'F4', 'F5', 'F8', null],
       default: null
     },
 
-    // For task_buffer logic
+    // task buffer fields
     priorityBoost: {
       type: Number,
       default: 0
@@ -125,14 +116,21 @@ const taskSchema = new mongoose.Schema(
     skipCount: {
       type: Number,
       default: 0
+    },
+
+    // filled when task completes
+    actualDurationMin: {
+      type: Number,
+      default: null
+    },
+    completedAt: {
+      type: Date,
+      default: null
     }
   },
-  {
-    timestamps: true
-  }
+  { timestamps: true }
 )
 
-// Indexes for most common queries
 taskSchema.index({ userId: 1, status: 1, priority: -1 })
 taskSchema.index({ goalId: 1, orderIndex: 1 })
 taskSchema.index({ userId: 1, frequency: 1, status: 1 })

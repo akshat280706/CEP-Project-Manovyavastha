@@ -1,8 +1,6 @@
 const groqClient = require('../../config/groq')
 const logger = require('../../utils/logger')
 
-// System prompt — instructions given to LLM before every conversation
-// User never sees this
 const SYSTEM_PROMPT = `You are a task decomposition engine for MANOVYAVASTHA, a cognitive-aware productivity scheduler.
 
 A user will give you their goal with context. Your job is to break it into 5-10 specific, actionable subtasks that can be scheduled across days.
@@ -36,7 +34,7 @@ Return this EXACT JSON format with no deviations:
     "repeat_days": [],
     "phase": "foundation|development|intensive|maintenance",
     "depends_on": [],
-    "topic_name": "the specific subject area e.g. Graph Theory, Dynamic Programming, React Hooks"
+    "topic_name": "specific subject area e.g. Graph Theory, Dynamic Programming"
   }
 ]
 
@@ -44,35 +42,28 @@ Field rules:
 - difficulty: 0=easy, 1=medium, 2=hard
 - priority: 1-10 (10 = most critical)
 - repeat_days: [1,2,3,4,5,6,7] where 1=Monday, 7=Sunday
-- depends_on: array of order_index values that must complete first. Empty array means no dependency
+- depends_on: array of order_index values that must complete first. Empty = no dependency
 - phase: foundation=early learning, development=building, intensive=deadline crunch, maintenance=daily habits
-- topic_name: the specific subject this task belongs to. Group related tasks under same topic_name`
+- topic_name: specific subject this task belongs to. Group related tasks under same topic_name`
 
-/**
- * Build the user message from goal data and optional uploaded material
- */
 const buildUserMessage = (goalData, material = null) => {
   let message = `Goal: ${goalData.title}`
 
   if (goalData.description) {
     message += `\nAdditional context: ${goalData.description}`
   }
-
   if (goalData.goalType) {
     message += `\nGoal type: ${goalData.goalType}`
   }
-
   if (goalData.deadline) {
     message += `\nDeadline: ${goalData.deadline}`
   }
-
   if (goalData.hoursPerDay) {
     message += `\nAvailable hours per day: ${goalData.hoursPerDay} hours`
   }
-
   if (material) {
     if (material.type === 'text') {
-      message += `\n\nStudy material / syllabus provided:\n---\n${material.content}\n---\nCreate tasks specifically based on this material.`
+      message += `\n\nStudy material provided:\n---\n${material.content}\n---\nCreate tasks specifically based on this material.`
     } else if (material.type === 'image') {
       message += `\n\nThe user has uploaded an image of their study material. Analyze it and create tasks based on its content.`
     }
@@ -81,13 +72,8 @@ const buildUserMessage = (goalData, material = null) => {
   return message
 }
 
-/**
- * Parse and validate the JSON response from LLM
- * Also fills in safe defaults if any field is missing
- */
 const parseTasksFromResponse = (content) => {
   try {
-    // Remove markdown code blocks if LLM added them despite instructions
     const cleaned = content
       .replace(/```json\n?/gi, '')
       .replace(/```\n?/gi, '')
@@ -98,36 +84,25 @@ const parseTasksFromResponse = (content) => {
     if (!Array.isArray(tasks)) {
       throw new Error('LLM response is not an array')
     }
-
     if (tasks.length === 0) {
       throw new Error('LLM returned empty task list')
     }
 
-    // Validate and fill defaults for each task
     const validated = tasks.map((task, index) => ({
-      title: task.title || `Task ${index + 1}`,
-      description: task.description || '',
-      task_type: task.task_type || 'theory',
-      difficulty: [0, 1, 2].includes(Number(task.difficulty))
-        ? Number(task.difficulty)
-        : 1,
+      title:             task.title || `Task ${index + 1}`,
+      description:       task.description || '',
+      task_type:         task.task_type || 'theory',
+      difficulty:        [0, 1, 2].includes(Number(task.difficulty)) ? Number(task.difficulty) : 1,
       base_duration_min: Number(task.base_duration_min) || 30,
-      priority: Math.min(10, Math.max(1, Number(task.priority) || 5)),
-      order_index: Number(task.order_index) || index + 1,
-      frequency: ['once', 'daily', 'weekly', 'near_deadline']
-        .includes(task.frequency)
-        ? task.frequency
-        : 'once',
-      repeat_days: Array.isArray(task.repeat_days) ? task.repeat_days : [],
-      phase: ['foundation', 'development', 'intensive', 'maintenance']
-        .includes(task.phase)
-        ? task.phase
-        : 'foundation',
-      depends_on: Array.isArray(task.depends_on) ? task.depends_on : [],
-
-      // NEW FIELD — topic_name from LLM
-      // Default to empty string if LLM forgot to include it
-      topic_name: task.topic_name || ''
+      priority:          Math.min(10, Math.max(1, Number(task.priority) || 5)),
+      order_index:       Number(task.order_index) || index + 1,
+      frequency:         ['once', 'daily', 'weekly', 'near_deadline'].includes(task.frequency)
+                           ? task.frequency : 'once',
+      repeat_days:       Array.isArray(task.repeat_days) ? task.repeat_days : [],
+      phase:             ['foundation', 'development', 'intensive', 'maintenance'].includes(task.phase)
+                           ? task.phase : 'foundation',
+      depends_on:        Array.isArray(task.depends_on) ? task.depends_on : [],
+      topic_name:        task.topic_name || ''
     }))
 
     logger.info(`LLM returned ${validated.length} valid tasks`)
@@ -140,66 +115,48 @@ const parseTasksFromResponse = (content) => {
   }
 }
 
-/**
- * First decomposition — no conversation history
- * Called when user submits their goal for the first time
- */
 const decomposeGoal = async (goalData, material = null) => {
   logger.info(`Decomposing goal: "${goalData.title}"`)
 
   const userMessage = buildUserMessage(goalData, material)
-
-  // Build messages array
   const messages = [
     { role: 'system', content: SYSTEM_PROMPT },
     { role: 'user', content: userMessage }
   ]
 
-  // If material is an image handle it as vision content
   if (material?.type === 'image') {
     messages[messages.length - 1] = {
       role: 'user',
       content: [
         {
           type: 'image_url',
-          image_url: {
-            url: `data:${material.mimetype};base64,${material.base64}`
-          }
+          image_url: { url: `data:${material.mimetype};base64,${material.base64}` }
         },
-        {
-          type: 'text',
-          text: userMessage
-        }
+        { type: 'text', text: userMessage }
       ]
     }
   }
 
   const response = await groqClient.chat.completions.create({
-    model: process.env.GROQ_MODEL || 'llama-3.3-70b-versatile',
+    model:       process.env.GROQ_MODEL || 'llama-3.3-70b-versatile',
     messages,
     temperature: 0.3,
-    max_tokens: 3000
+    max_tokens:  3000
   })
 
   const content = response.choices[0].message.content
   return parseTasksFromResponse(content)
 }
 
-/**
- * Refinement — continues conversation with history
- * Called for turns 2 through 6
- */
 const refineGoal = async (conversationHistory, newMessage, material = null) => {
   const turnNumber = Math.ceil(conversationHistory.length / 2) + 1
   logger.info(`Refining goal — turn ${turnNumber}`)
 
-  // Append material content to new message if new file uploaded
   let fullNewMessage = newMessage
   if (material?.type === 'text') {
     fullNewMessage += `\n\nAdditional material uploaded:\n---\n${material.content}\n---`
   }
 
-  // Build full messages array with complete history
   const messages = [
     { role: 'system', content: SYSTEM_PROMPT },
     ...conversationHistory,
@@ -207,10 +164,10 @@ const refineGoal = async (conversationHistory, newMessage, material = null) => {
   ]
 
   const response = await groqClient.chat.completions.create({
-    model: process.env.GROQ_MODEL || 'llama-3.3-70b-versatile',
+    model:       process.env.GROQ_MODEL || 'llama-3.3-70b-versatile',
     messages,
     temperature: 0.3,
-    max_tokens: 3000
+    max_tokens:  3000
   })
 
   const assistantContent = response.choices[0].message.content
@@ -218,9 +175,8 @@ const refineGoal = async (conversationHistory, newMessage, material = null) => {
 
   return {
     tasks,
-    // Return assistant message so frontend can append to history
     assistantMessage: {
-      role: 'assistant',
+      role:    'assistant',
       content: assistantContent
     }
   }
