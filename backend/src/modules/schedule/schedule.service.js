@@ -1,9 +1,9 @@
-const Task             = require('../../models/Task.js')
+const Task = require('../../models/Task.js')
 const ScheduledSession = require('../../models/ScheduleSession.js')
-const logger           = require('../../utils/logger.js')
+const logger = require('../../utils/logger.js')
 
 const getTodaySchedule = async (userId) => {
-  const today    = new Date()
+  const today = new Date()
   today.setHours(0, 0, 0, 0)
   const tomorrow = new Date(today)
   tomorrow.setDate(today.getDate() + 1)
@@ -12,9 +12,9 @@ const getTodaySchedule = async (userId) => {
     userId,
     scheduledDate: { $gte: today, $lt: tomorrow }
   })
-  .populate('taskId', 'title taskType difficulty topicName')
-  .sort({ startTime: 1 })
-  .lean()
+    .populate('taskId', 'title taskType difficulty topicName')
+    .sort({ startTime: 1 })
+    .lean()
 
   return { date: today, sessions }
 }
@@ -22,39 +22,46 @@ const getTodaySchedule = async (userId) => {
 const regenerateSchedule = async (userId, redisClient) => {
   const fatigueRaw = 3
 
+  // FIX: Include 'pending' AND 'scheduled' tasks
   const pendingTasks = await Task.find({
     userId,
-    status: 'scheduled'
+    status: { $in: ['pending', 'scheduled'] }
   }).lean()
 
+  // FIX: Include 'failed' AND 'skipped' tasks
   const failedTasks = await Task.find({
     userId,
-    status:        { $in: ['failed', 'skipped'] },
+    status: { $in: ['failed', 'skipped'] },
     cooldownUntil: { $lte: new Date() }
   }).lean()
 
+  logger.info(`Regenerate - User: ${userId}`)
+  logger.info(`  Pending tasks: ${pendingTasks.length}`)
+  logger.info(`  Failed/Skipped tasks: ${failedTasks.length}`)
+
   const mapTask = (task, source) => ({
-    task_id:            task._id.toString(),
-    task_type:          task.taskType,
-    difficulty:         task.difficulty,
-    base_duration_min:  task.baseDurationMin,
-    deadline:           task.deadline
-                          ? new Date(task.deadline).toISOString()
-                          : null,
+    task_id: task._id.toString(),
+    task_name: task.title,
+    task_type: task.taskType,
+    difficulty: task.difficulty,
+    base_duration_min: task.baseDurationMin,
+    deadline: task.deadline
+      ? new Date(task.deadline).toISOString()
+      : null,
     source,
-    attempt_count:      task.attemptCount    || 0,
-    priority_boost:     task.priorityBoost   || 0,
+    attempt_count: task.attemptCount || 0,
+    priority_boost: task.priorityBoost || 0,
     last_failed_reason: task.lastFailedReason || null,
-    llm_order:          task.orderIndex
+    llm_order: task.orderIndex
   })
 
   const payload = {
-    type:    'REGENERATE_SCHEDULE',
+    type: 'REGENERATE_SCHEDULE',
     user_id: userId.toString(),
-    now:     new Date().toISOString(),
-    user_state:    { fatigue_raw: fatigueRaw },
+    now: new Date().toISOString(),
+    user_state: { fatigue_raw: fatigueRaw },
     pending_tasks: pendingTasks.map(t => mapTask(t, 'pending')),
-    failed_tasks:  failedTasks.map(t => mapTask(t, 'failed'))
+    failed_tasks: failedTasks.map(t => mapTask(t, 'failed'))
   }
 
   await redisClient.lpush('schedule_queue', JSON.stringify(payload))
@@ -73,8 +80,8 @@ const completeTask = async (taskId, userId, actualDurationMin) => {
 
   const needsFeedback = ['once', 'near_deadline'].includes(task.frequency)
 
-  task.status           = 'completed'
-  task.completedAt      = new Date()
+  task.status = 'completed'
+  task.completedAt = new Date()
   task.actualDurationMin = actualDurationMin || task.baseDurationMin
   await task.save()
 
@@ -89,6 +96,7 @@ const completeTask = async (taskId, userId, actualDurationMin) => {
   return { task, needsFeedback }
 }
 
+// FIX: missTask should set status to 'failed', not 'skipped'
 const missTask = async (taskId, userId) => {
   const task = await Task.findOne({ _id: taskId, userId })
   if (!task) {
@@ -103,11 +111,11 @@ const missTask = async (taskId, userId) => {
     return { task, addedToBuffer: false }
   }
 
-  task.status    = 'skipped'
-  task.skipCount += 1
-  task.source    = 'failed'
+  // FIX: Set status to 'failed'
+  task.status = 'failed'
+  task.source = 'failed'
   task.attemptCount += 1
-  task.priorityBoost += task.skipCount
+  task.priorityBoost = (task.priorityBoost || 0) + 1
 
   const cooldown = new Date()
   cooldown.setHours(cooldown.getHours() + 6)
@@ -116,6 +124,7 @@ const missTask = async (taskId, userId) => {
   await task.save()
   await blockDependents(task.goalId, task.orderIndex, userId)
 
+  logger.info(`Task failed: ${taskId}, priorityBoost: ${task.priorityBoost}`)
   return { task, addedToBuffer: true }
 }
 
@@ -127,20 +136,19 @@ const skipTask = async (taskId, userId) => {
     throw err
   }
 
-  task.status    = 'skipped'
-  task.skipCount += 1
-  task.source    = 'failed'
+  task.status = 'skipped'
+  task.source = 'failed'
   task.attemptCount += 1
-  task.priorityBoost += (task.skipCount * 2)
+  task.priorityBoost = (task.priorityBoost || 0) + 2  // Skip gives higher boost
 
   const cooldown = new Date()
-  cooldown.setHours(cooldown.getHours() + 24)
+  cooldown.setHours(cooldown.getHours() + 12)
   task.cooldownUntil = cooldown
 
   await task.save()
   await blockDependents(task.goalId, task.orderIndex, userId)
 
-  logger.info(`Task skipped: ${taskId}`)
+  logger.info(`Task skipped: ${taskId}, priorityBoost: ${task.priorityBoost}`)
   return { task, addedToBuffer: true }
 }
 
@@ -149,7 +157,7 @@ const blockDependents = async (goalId, skippedOrderIndex, userId) => {
     goalId,
     userId,
     dependsOn: skippedOrderIndex,
-    status:    { $in: ['pending', 'scheduled'] }
+    status: { $in: ['pending', 'scheduled'] }
   })
 
   for (const task of dependentTasks) {
@@ -166,7 +174,7 @@ const unblockDependents = async (goalId, completedOrderIndex, userId) => {
     goalId,
     userId,
     dependsOn: completedOrderIndex,
-    status:    'blocked'
+    status: 'blocked'
   })
 
   for (const task of blockedTasks) {
