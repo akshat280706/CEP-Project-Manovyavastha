@@ -1,0 +1,65 @@
+# # Node
+# node_modules/
+# npm-debug.log
+# yarn-error.log
+
+# # Environment files
+# .env
+# .env.local
+# .env.*.local
+
+# # Logs
+# logs/
+# *.log
+
+# # OS files
+# .DS_Store
+# Thumbs.db
+
+# # Build
+# dist/
+# build/
+
+# # Python (RL folder)
+# __pycache__/
+# *.pyc
+# venv/
+
+# # IDE
+# .vscode/
+# .idea/
+
+# # Coverage
+# coverage/
+
+# Dependencies
+backend/node_modules/
+client/node_modules/
+
+# Environment files — NEVER push these
+backend/.env
+rl/.env
+client/.env
+
+# Python
+rl/__pycache__/
+rl/*.pyc
+rl/venv/
+
+# Logs
+backend/logs/
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Build output
+client/build/
+client/dist/
+
+# Uploads (temporary files)
+backend/uploads/
+
+# Package lock (keep package-lock.json but ignore lock files you dont need)
+# Actually keep package-lock.json — dont ignore it
