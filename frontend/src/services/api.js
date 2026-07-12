@@ -1,6 +1,10 @@
 import axios from 'axios';
 
-const API_BASE = 'http://localhost:5000/api';
+// FIX: this was hardcoded to 'http://localhost:5000/api', which only works
+// when running the backend on your own machine. Any real deployment
+// (Vercel/Netlify frontend + a hosted backend) would silently try to call
+// localhost from the user's browser and fail every request.
+const API_BASE = process.env.REACT_APP_API_URL || 'http://localhost:5000/api';
 
 const api = axios.create({
     baseURL: API_BASE,
@@ -33,8 +37,42 @@ export const getProfile = async () => {
 };
 
 // Goal APIs
-export const decomposeGoal = async (goalData) => {
+// FIX: decomposeGoal previously never accepted a file at all — the backend's
+// upload.single('material') + pdfExtractor.js + Groq vision-image path were
+// fully built but unreachable from the UI. When a file is given, send
+// multipart/form-data instead of plain JSON.
+export const decomposeGoal = async (goalData, file) => {
+    if (file) {
+        const formData = new FormData();
+        Object.entries(goalData).forEach(([key, value]) => {
+            if (value !== undefined && value !== null) formData.append(key, value);
+        });
+        formData.append('material', file);
+        const response = await api.post('/llm/decompose', formData, {
+            headers: { 'Content-Type': 'multipart/form-data' },
+        });
+        return response.data;
+    }
     const response = await api.post('/llm/decompose', goalData);
+    return response.data;
+};
+
+// FIX: llm.service.js's refineGoal (multi-turn conversational task
+// refinement) had a full backend route (/llm/refine) but no frontend
+// wrapper at all, so the whole feature was unreachable.
+export const refineGoal = async (conversationHistory, newMessage, turnCount, file) => {
+    if (file) {
+        const formData = new FormData();
+        formData.append('conversationHistory', JSON.stringify(conversationHistory));
+        formData.append('newMessage', newMessage);
+        formData.append('turnCount', turnCount);
+        formData.append('material', file);
+        const response = await api.post('/llm/refine', formData, {
+            headers: { 'Content-Type': 'multipart/form-data' },
+        });
+        return response.data;
+    }
+    const response = await api.post('/llm/refine', { conversationHistory, newMessage, turnCount });
     return response.data;
 };
 

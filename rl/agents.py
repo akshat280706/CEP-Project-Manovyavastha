@@ -336,6 +336,76 @@ def break_agent(
 
 
 # ─────────────────────────────────────────────
+# AGENT 4 — ContextSwitchAgent (NEW: was previously a hardcoded "switch_now")
+# ─────────────────────────────────────────────
+
+TRANSITION_BUFFER_MIN = {
+    "switch_now":           0,
+    "delay_switch":         10,
+    "cluster_with_similar": 0,
+}
+
+
+def context_switch_agent(
+    user_id: str,
+    prev_task_type: str,
+    next_task_type: str,
+    session_position: int,
+) -> dict:
+    """
+    Decides how to handle moving from one task into a DIFFERENT task type
+    (e.g. coding -> reading). Previously this was hardcoded to "switch_now"
+    everywhere in orchestrator.py, so qtable_context_switch's real actions
+    (delay_switch / cluster_with_similar) were never actually chosen or
+    learned from — only ever logged as a fixed placeholder.
+
+    Deliberately does NOT use gaussian_select(): updater.py's own
+    SIGMA_DECAY table defines sigma=0.0 for every visit-count bucket of
+    this agent ("context switch has no Gaussian — sigma unused"), and
+    agents.py's SIGMA_DECAY has no "context_switch" entry at all — calling
+    gaussian_select() here would raise a KeyError. Once past cold start,
+    this agent picks the best-known action deterministically instead.
+
+    Returns:
+        {
+            "action": "delay_switch",
+            "transition_buffer_min": int,
+            "cold_start": bool
+        }
+    """
+    if prev_task_type == "none" or prev_task_type == next_task_type:
+        # nothing to switch between yet, or same task type — no real decision to make
+        return {
+            "action":               "switch_now",
+            "transition_buffer_min": 0,
+            "cold_start":            False,
+        }
+
+    state = {
+        "prev_task_type":   prev_task_type,
+        "next_task_type":   next_task_type,
+        "session_position": session_position,
+    }
+    q_rows = qtable_reader("qtable_context_switch", user_id, state)
+
+    if _is_cold_start(q_rows):
+        # cold-start heuristic: default to a short buffer rather than
+        # assuming an unfamiliar type-switch is fine with no transition at all
+        action = "delay_switch"
+        cold_start = True
+    else:
+        best_row = max(q_rows, key=lambda r: r["q_value"])
+        action = best_row["action"]
+        cold_start = False
+
+    return {
+        "action":               action,
+        "transition_buffer_min": TRANSITION_BUFFER_MIN[action],
+        "cold_start":           cold_start,
+    }
+
+
+# ─────────────────────────────────────────────
 # SELECTOR
 # ─────────────────────────────────────────────
 
@@ -357,19 +427,41 @@ def _is_breach_imminent(task: dict, virtual_now: datetime) -> bool:
     return _compute_slack(task, virtual_now) < 0
 
 
+def _session_position_bucket(index: int, total: int) -> int:
+    """
+    Must produce the SAME bucketing as orchestrator.py's _session_position(),
+    since that's what gets stored in context_switch_state — and MongoDB's
+    embedded-document equality match requires the read-side state shape to
+    match the write-side state shape exactly (same keys), or the row is
+    never found again after being written.
+    """
+    ratio = index / max(total, 1)
+    if ratio < 0.3:
+        return 0
+    if ratio < 0.7:
+        return 1
+    return 2
+
+
 def _context_switch_score(
     task: dict,
     prev_task_type: str | None,
     user_id: str,
+    session_position: int = 0,
 ) -> float:
     if prev_task_type is None:
         return 0.0
     if task["task_type"] == prev_task_type:
         return +0.5
 
+    # FIX: previously queried with only {prev_task_type, next_task_type},
+    # but updater.py writes rows with a 3rd key (session_position) included.
+    # MongoDB's exact embedded-doc match means a 2-key query could NEVER
+    # find a 3-key stored row — this table was silently always cold-start.
     q_rows = qtable_reader("qtable_context_switch", user_id, {
-        "prev_task_type": prev_task_type,
-        "next_task_type": task["task_type"],
+        "prev_task_type":   prev_task_type,
+        "next_task_type":   task["task_type"],
+        "session_position": session_position,
     })
 
     if _is_cold_start(q_rows):
@@ -413,12 +505,13 @@ def score_task(
     user_state: dict,
     user_id: str,
     virtual_now: datetime,
+    session_position: int = 0,
 ) -> float:
     slack = _compute_slack(task, virtual_now)
     cognitive_score = _cognitive_fit_score(task, user_state)
     retry_score = _retry_score(task)
     starvation_score = task.get("priority_boost", 0) * 0.3
-    context_score = _context_switch_score(task, prev_task_type, user_id)
+    context_score = _context_switch_score(task, prev_task_type, user_id, session_position)
     time_score = time_preference_score(task, user_id, virtual_now)
 
     secondary = (
@@ -493,11 +586,15 @@ def run_selector(
                 candidates = remaining  # all are F2-failed, schedule anyway
 
             # score and select — tiebreak on earliest deadline
+            current_index = len(scheduled)
+            current_total = len(scheduled) + len(remaining)
+            session_position = _session_position_bucket(current_index, current_total)
+
             selected = min(
                 candidates,
                 key=lambda t: (
                     -score_task(t, prev_task_type, user_state,
-                                user_id, virtual_now),
+                                user_id, virtual_now, session_position),
                     t["deadline"],
                 )
             )

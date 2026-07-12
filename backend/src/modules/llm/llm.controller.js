@@ -44,8 +44,22 @@ const decompose = async (req, res, next) => {
 
 const refine = async (req, res, next) => {
   try {
-    const { conversationHistory, newMessage, turnCount } = req.body
+    let { conversationHistory, newMessage, turnCount } = req.body
     let material = null
+
+    // FIX: when a file is attached, the request is multipart/form-data,
+    // so Multer parses every other field as a plain string — including
+    // conversationHistory (should be an array) and turnCount (should be
+    // a number). Without this, uploading a file during refinement would
+    // always fail the Array.isArray check below.
+    if (typeof conversationHistory === 'string') {
+      try {
+        conversationHistory = JSON.parse(conversationHistory)
+      } catch {
+        conversationHistory = []
+      }
+    }
+    turnCount = Number(turnCount) || 0
 
     if (turnCount >= 6) {
       return res.status(400).json({

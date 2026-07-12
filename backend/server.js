@@ -25,7 +25,19 @@ connectDB()
 // GLOBAL MIDDLEWARE
 // ─────────────────────────────────────────────
 app.use(helmet())
-app.use(cors())
+
+// FIX: cors() was being called with no config at all, which defaults to
+// Access-Control-Allow-Origin: * — any website on the internet could read
+// responses from this API from a user's browser. Restrict it to the real
+// frontend origin(s), configurable via env for dev vs production.
+const allowedOrigins = (process.env.FRONTEND_URL || 'http://localhost:3000').split(',')
+app.use(cors({
+  origin: allowedOrigins,
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+}))
+
 app.use(morgan('dev'))
 
 app.use(express.json({ limit: '10mb' }))

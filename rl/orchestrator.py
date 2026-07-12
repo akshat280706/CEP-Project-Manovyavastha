@@ -8,7 +8,7 @@ NO COLLISIONS between tasks from different goals.
 """
 
 from datetime import datetime, timedelta
-from agents import run_selector, duration_agent, break_agent
+from agents import run_selector, duration_agent, break_agent, context_switch_agent
 
 
 # ─────────────────────────────────────────────
@@ -20,6 +20,10 @@ SECTION_CEILING = {
     1: {"multiplier": 1.35, "break_budget": 15},
     2: {"multiplier": 1.5, "break_budget": 30},
 }
+
+# Worst-case room to reserve for a context-switch transition buffer
+# (must be >= the largest value in agents.py's TRANSITION_BUFFER_MIN)
+CONTEXT_SWITCH_BUFFER_MAX = 10
 
 # Working hours: 8:00 AM to 10:00 PM (14 hours available)
 WORKING_HOURS_START = 8
@@ -182,10 +186,15 @@ def _distribute_across_days_with_slots(
     current_day_offset = 0
 
     for task in ordered_tasks:
+        ceiling = SECTION_CEILING[task["difficulty"]]
+        # FIX: reserve room for BOTH the worst-case task duration AND a
+        # possible post-task break, so the Break Agent always has real
+        # room to place a break without colliding with the next task's slot.
+        break_budget_min = ceiling["break_budget"]
         task_duration_min = int(
-            task["base_duration_min"] *
-            SECTION_CEILING[task["difficulty"]]["multiplier"]
+            task["base_duration_min"] * ceiling["multiplier"]
         )
+        reserved_duration_min = task_duration_min + break_budget_min + CONTEXT_SWITCH_BUFFER_MAX
 
         max_days_to_try = 30
         days_tried = 0
@@ -204,7 +213,7 @@ def _distribute_across_days_with_slots(
                 break
 
             slot_start = global_slot_manager.get_available_slot(
-                current_date, task_duration_min)
+                current_date, reserved_duration_min)
 
             if slot_start is not None:
                 task_end = slot_start + timedelta(minutes=task_duration_min)
@@ -214,6 +223,7 @@ def _distribute_across_days_with_slots(
                 task_copy["scheduled_start"] = slot_start
                 task_copy["scheduled_end"] = task_end
                 task_copy["scheduled_duration_min"] = task_duration_min
+                task_copy["break_budget_min"] = break_budget_min
 
                 tasks_with_days.append(task_copy)
                 slot_found = True
@@ -246,15 +256,27 @@ def _build_sections(
     user_state: dict,
     now: datetime,
     deadline: datetime,
-    global_slot_manager: GlobalTimeSlotManager
+    global_slot_manager: GlobalTimeSlotManager,
+    efficiency_profile: dict | None = None,
 ) -> tuple[list[dict], list[dict]]:
 
     tasks_with_days, unschedulable = _distribute_across_days_with_slots(
         ordered_tasks, now, deadline, global_slot_manager
     )
 
+    efficiency_profile = efficiency_profile or {}
+    fatigue_level = _fatigue_bucket(user_state.get("fatigue_raw", 3))
+
     sections = []
-    for task in tasks_with_days:
+    total = len(tasks_with_days)
+
+    # FIX: track the previous task in the sequence so break/context-switch
+    # state reflects what ACTUALLY came before, instead of a hardcoded "none".
+    prev_task_type = "none"
+    prev_task_difficulty = 0
+    prev_scheduled_date = None
+
+    for index, task in enumerate(tasks_with_days):
         difficulty = task["difficulty"]
         task_start = task["scheduled_start"]
 
@@ -266,23 +288,62 @@ def _build_sections(
             difficulty=difficulty,
             deadline_pressure=deadline_pressure,
             base_duration_min=task["base_duration_min"],
-            efficiency_profile={},
+            efficiency_profile=efficiency_profile,
         )
 
         scheduled_duration_min = dur["scheduled_duration_min"]
         task_end = task_start + timedelta(minutes=scheduled_duration_min)
 
+        # A task only "continues" the same work stretch if it's the very
+        # next task, on the same day, right after the previous one.
+        same_stretch = (
+            prev_scheduled_date is not None
+            and task["scheduled_date"] == prev_scheduled_date
+        )
+        consecutive_minutes = scheduled_duration_min if same_stretch else 0
+        break_prev_type = prev_task_type if same_stretch else "none"
+        break_prev_difficulty = prev_task_difficulty if same_stretch else 0
+
+        # FIX: actually call break_agent() instead of hardcoding "no_break".
+        brk = break_agent(
+            user_id=user_id,
+            fatigue_level=fatigue_level,
+            consecutive_minutes=consecutive_minutes,
+            prev_task_type=break_prev_type,
+            next_task_type=task["task_type"],
+            prev_task_difficulty=break_prev_difficulty,
+            next_task_difficulty=difficulty,
+            section_budget_min=task.get("break_budget_min", 0) + scheduled_duration_min,
+            scheduled_duration_min=scheduled_duration_min,
+        )
+
+        session_position = _session_position(index, total)
+
+        # FIX: actually call context_switch_agent() instead of hardcoding
+        # "switch_now" / a derived label. Its transition buffer is folded
+        # into break_duration_min (total post-task idle time) rather than
+        # adding a new DB field, since the slot manager already reserved
+        # room for both a break AND this transition (see
+        # CONTEXT_SWITCH_BUFFER_MAX in the slot-reservation step above).
+        csw = context_switch_agent(
+            user_id=user_id,
+            prev_task_type=break_prev_type,
+            next_task_type=task["task_type"],
+            session_position=session_position,
+        )
+        total_buffer_min = brk["break_duration_min"] + csw["transition_buffer_min"]
+
         section = {
             "task_id": task["task_id"],
             "task_type": task["task_type"],
             "difficulty": difficulty,
-            "break_duration_min": 0,
+            "break_duration_min": total_buffer_min,
             "scheduled_duration_min": scheduled_duration_min,
             "start_time": task_start.isoformat(),
             "end_time": task_end.isoformat(),
             "duration_action": dur["action"],
-            "break_action": "no_break",
-            "context_switch_action": "switch_now",
+            "break_action": brk["action"],
+            "context_switch_action": csw["action"],
             "time_action": f"block_{_hour_to_block(task_start.hour)}",
             "duration_state": {
                 "task_type": task["task_type"],
@@ -294,22 +355,27 @@ def _build_sections(
                 "task_type": task["task_type"],
             },
             "break_state": {
-                "fatigue_level": _fatigue_bucket(user_state.get("fatigue_raw", 3)),
-                "consecutive_minutes_bucket": 0,
-                "prev_task_type": "none",
+                "fatigue_level": fatigue_level,
+                "consecutive_minutes_bucket": 0 if consecutive_minutes < 30 else (1 if consecutive_minutes < 60 else 2),
+                "prev_task_type": break_prev_type,
                 "next_task_type": task["task_type"],
                 "next_task_difficulty": difficulty,
             },
             "context_switch_state": {
-                "prev_task_type": "none",
+                "prev_task_type": break_prev_type,
                 "next_task_type": task["task_type"],
-                "session_position": 0,
+                "session_position": session_position,
             },
             "cold_start_duration": dur["cold_start"],
-            "cold_start_break": True,
+            "cold_start_break": brk["cold_start"],
+            "cold_start_context_switch": csw["cold_start"],
             "source": task.get("source", "new"),
         }
         sections.append(section)
+
+        prev_task_type = task["task_type"]
+        prev_task_difficulty = difficulty
+        prev_scheduled_date = task["scheduled_date"]
 
     return sections, unschedulable
 
@@ -323,8 +389,9 @@ def generate_schedule(
     tasks: list[dict],
     user_state: dict,
     now: datetime,
+    efficiency_profile: dict | None = None,
 ) -> dict:
-    return _run(user_id, tasks, user_state, now)
+    return _run(user_id, tasks, user_state, now, efficiency_profile)
 
 
 def regenerate_schedule(
@@ -333,13 +400,14 @@ def regenerate_schedule(
     failed_tasks: list[dict],
     user_state: dict,
     now: datetime,
+    efficiency_profile: dict | None = None,
 ) -> dict:
     for t in pending_tasks:
         t["source"] = "pending"
     for t in failed_tasks:
         t["source"] = "failed"
     pool = pending_tasks + failed_tasks
-    return _run(user_id, pool, user_state, now)
+    return _run(user_id, pool, user_state, now, efficiency_profile)
 
 
 # ─────────────────────────────────────────────
@@ -351,6 +419,7 @@ def _run(
     pool: list[dict],
     user_state: dict,
     now: datetime,
+    efficiency_profile: dict | None = None,
 ) -> dict:
     # Ensure datetime is naive (local time, no timezone)
     if hasattr(now, 'tzinfo') and now.tzinfo:
@@ -416,6 +485,7 @@ def _run(
         now=now,
         deadline=deadline,
         global_slot_manager=global_slot_manager,
+        efficiency_profile=efficiency_profile,
     )
 
     # Combine unschedulable lists

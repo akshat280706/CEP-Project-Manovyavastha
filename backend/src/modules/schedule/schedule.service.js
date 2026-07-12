@@ -3,6 +3,22 @@ const ScheduledSession = require('../../models/ScheduleSession.js')
 const Goal = require('../../models/Goal.js')
 const logger = require('../../utils/logger.js')
 
+// FIX: previously user_state.fatigue_raw was hardcoded to 3 for every user,
+// every time, so the RL agents that factor in fatigue were reasoning
+// against a constant fake value. This uses the most recently reported
+// fatigueAfter as a real (if imperfect) proxy for current fatigue.
+const getLatestFatigue = async (userId) => {
+  const lastSession = await ScheduledSession.findOne({
+    userId,
+    fatigueAfter: { $ne: null }
+  })
+    .sort({ updatedAt: -1 })
+    .select('fatigueAfter')
+    .lean()
+
+  return lastSession?.fatigueAfter ?? 3
+}
+
 const getTodaySchedule = async (userId) => {
   const today = new Date()
   today.setHours(0, 0, 0, 0)
@@ -75,12 +91,14 @@ const regenerateSchedule = async (userId, redisClient) => {
     llm_order: task.orderIndex
   })
 
+  const fatigueRaw = await getLatestFatigue(userId)
+
   const payload = {
     type: 'REGENERATE_SCHEDULE',
     user_id: userId.toString(),
     now: new Date().toISOString(),
     user_state: {
-      fatigue_raw: 3,
+      fatigue_raw: fatigueRaw,
       hours_per_day: 24
     },
     pending_tasks: pendingTasks.map(t => mapTask(t, 'pending')),
