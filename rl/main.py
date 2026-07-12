@@ -4,7 +4,12 @@ main.py
 Entry point for the RL engine.
 Listens on Redis queues and processes messages.
 
-FIX #5: Use local system time (no timezone)
+FIX: previous versions of this file stripped timezone info and stored
+naive local-time datetimes directly, which MongoDB silently treated as
+UTC — causing evening-scheduled tasks to display on the wrong calendar
+day in the frontend. All datetimes are now explicitly converted to true
+UTC before being written to MongoDB (see LOCAL_TZ, parse_datetime, to_utc
+below).
 """
 
 from bson import ObjectId
@@ -15,7 +20,7 @@ from orchestrator import generate_schedule, regenerate_schedule
 import os
 import json
 import redis
-from datetime import datetime
+from datetime import datetime, timezone
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -44,18 +49,50 @@ db = client["manovyavastha"]
 # HELPERS
 # ─────────────────────────────────────────────
 
+# FIX: captures this machine's real local UTC offset at startup, e.g. +05:30
+# for IST. Used to correctly convert naive local-time datetimes to true UTC
+# before they're ever written to MongoDB.
+LOCAL_TZ = datetime.now().astimezone().tzinfo
+
+
 def parse_datetime(dt_str):
-    """Convert ISO string to naive datetime object (local time)."""
+    """
+    Convert an ISO string (naive, LOCAL wall-clock time, e.g. from
+    orchestrator.py's task_start.isoformat()) into a proper UTC-aware
+    datetime, safe to store in MongoDB.
+
+    FIX (this used to be the opposite — it stripped timezone info and
+    stored the naive datetime directly). MongoDB/pymongo treats a naive
+    Python datetime as if it were ALREADY UTC when storing it. So a task
+    scheduled for e.g. 9:00 PM local time was being saved as 9:00 PM UTC —
+    a genuinely different, later instant (5.5 hours later, for IST).
+    When the frontend later converted that stored UTC timestamp back to
+    the user's local timezone for display, it could land on the WRONG
+    calendar day entirely (9:00 PM IST -> stored as 21:00 UTC -> displayed
+    as 2:30 AM the NEXT day once converted back to IST) — which is exactly
+    why tasks appeared to vanish or move between day-tabs.
+    """
     if not dt_str:
         return None
     try:
-        # FIX #5: Remove timezone info, keep as naive local time
         dt = datetime.fromisoformat(dt_str.replace("Z", "+00:00"))
-        if dt.tzinfo:
-            dt = dt.replace(tzinfo=None)
-        return dt
-    except:
+        if dt.tzinfo is None:
+            # this string represents LOCAL wall-clock time — attach the
+            # real local offset, then convert to true UTC before storing.
+            dt = dt.replace(tzinfo=LOCAL_TZ)
+        return dt.astimezone(timezone.utc)
+    except Exception:
         return None
+
+
+def to_utc(local_naive_dt):
+    """Same fix as parse_datetime(), for datetime objects (not strings) —
+    e.g. the 'now' value used as scheduledDate, which had this exact same bug."""
+    if local_naive_dt is None:
+        return None
+    if local_naive_dt.tzinfo is None:
+        local_naive_dt = local_naive_dt.replace(tzinfo=LOCAL_TZ)
+    return local_naive_dt.astimezone(timezone.utc)
 
 
 def save_scheduled_sessions(user_id, goal_id, sections, scheduled_date):
@@ -68,13 +105,31 @@ def save_scheduled_sessions(user_id, goal_id, sections, scheduled_date):
 
     session_docs = []
     for section in sections:
+        start_time_utc = parse_datetime(section["start_time"])
+
+        # FIX: previously every session in a multi-day batch was stamped
+        # with the SAME scheduledDate — the moment "regenerate" was
+        # clicked — even though tasks get distributed across many
+        # different future calendar days. That meant Node's
+        # getTodaySchedule() (which filters strictly on scheduledDate)
+        # could only ever find sessions matching the generation day,
+        # never the days they were actually scheduled for. Derive each
+        # session's own calendar day from its own start time instead.
+        if start_time_utc is not None:
+            local_start = start_time_utc.astimezone(LOCAL_TZ)
+            local_midnight = local_start.replace(
+                hour=0, minute=0, second=0, microsecond=0)
+            session_scheduled_date = local_midnight.astimezone(timezone.utc)
+        else:
+            session_scheduled_date = to_utc(scheduled_date)
+
         doc = {
             "taskId":    ObjectId(section["task_id"]),
             "goalId":    ObjectId(goal_id),
             "userId":    ObjectId(user_id),
 
-            "scheduledDate":        scheduled_date,
-            "startTime":            parse_datetime(section["start_time"]),
+            "scheduledDate":        session_scheduled_date,
+            "startTime":            start_time_utc,
             "endTime":              parse_datetime(section["end_time"]),
             "scheduledDurationMin": section["scheduled_duration_min"],
             "breakDurationMin":     section["break_duration_min"],
@@ -117,12 +172,78 @@ def update_task_status(task_ids, status="scheduled"):
     )
 
 
+def build_efficiency_profile(user_id):
+    """
+    FIX: previously the orchestrator always received efficiency_profile={},
+    so duration_agent's cold-start personalization branch was dead code.
+
+    This builds a real per-task-type efficiency profile from the user's
+    completed sessions: how their actual duration compared to what was
+    scheduled, on average, for each task_type.
+    """
+    pipeline = [
+        {"$match": {
+            "userId": ObjectId(user_id),
+            "outcome": "completed",
+            "actualDurationMin": {"$ne": None},
+            "scheduledDurationMin": {"$gt": 0},
+        }},
+        {"$group": {
+            "_id": "$durationState.taskType",
+            "avg_ratio": {
+                "$avg": {"$divide": ["$actualDurationMin", "$scheduledDurationMin"]}
+            },
+            "visit_count": {"$sum": 1},
+        }},
+    ]
+
+    profile = {}
+    try:
+        for row in db.scheduledsessions.aggregate(pipeline):
+            task_type = row["_id"]
+            if not task_type:
+                continue
+            profile[task_type] = {
+                "multiplier": round(row["avg_ratio"], 2),
+                "visit_count": row["visit_count"],
+            }
+    except Exception as e:
+        print(f"  Could not build efficiency profile: {e}")
+
+    return profile
+
+
+def get_latest_fatigue(user_id, default=3):
+    """
+    FIX: previously fatigue_raw was hardcoded to 3 everywhere. Use the most
+    recently reported fatigueAfter value as a real (if imperfect) proxy for
+    the user's current state.
+    """
+    try:
+        last = db.scheduledsessions.find(
+            {"userId": ObjectId(user_id), "fatigueAfter": {"$ne": None}}
+        ).sort("updatedAt", -1).limit(1)
+        last = list(last)
+        if last:
+            return last[0]["fatigueAfter"]
+    except Exception as e:
+        print(f"  Could not fetch latest fatigue: {e}")
+    return default
+
+
 # ─────────────────────────────────────────────
 # QUEUE HANDLERS
 # ─────────────────────────────────────────────
 
 def handle_rl_task_queue(message):
     """
+    NOTE (found during code review): as of this fix, the Node.js backend
+    never pushes to 'rl_task_queue' — goal creation and manual regeneration
+    both go through 'schedule_queue' / handle_schedule_queue instead. This
+    handler is kept (in case it's wired up again later) but has no current
+    producer. Still updated with the same fixes as handle_schedule_queue
+    so it isn't left further out of date.
+
     Handles new task decomposition from Node.js.
     Runs generate_schedule() and saves sessions to MongoDB.
     """
@@ -144,13 +265,16 @@ def handle_rl_task_queue(message):
     # FIX #5: Use local time, not UTC
     now = datetime.now()
 
-    user_state = {"fatigue_raw": 3}  # default — later from user profile
+    # FIX: real fatigue instead of hardcoded 3
+    user_state = {"fatigue_raw": get_latest_fatigue(user_id)}
+    efficiency_profile = build_efficiency_profile(user_id)
 
     result = generate_schedule(
         user_id=user_id,
         tasks=tasks,
         user_state=user_state,
         now=now,
+        efficiency_profile=efficiency_profile,
     )
 
     sections = result["sections"]
@@ -189,7 +313,14 @@ def handle_schedule_queue(message):
     pending_tasks = data.get("pending_tasks", [])
     failed_tasks = data.get("failed_tasks", [])
     now_str = data.get("now", datetime.now().isoformat())
-    user_state = data.get("user_state", {"fatigue_raw": 3})
+    user_state = data.get("user_state") or {}
+
+    # FIX: if Node didn't supply a real fatigue value (or sent the old
+    # hardcoded placeholder), fall back to the user's real latest reading.
+    if not user_state.get("fatigue_raw"):
+        user_state["fatigue_raw"] = get_latest_fatigue(user_id)
+
+    efficiency_profile = build_efficiency_profile(user_id)
 
     print(f"\n[SCHEDULE QUEUE] Regeneration for user {user_id}")
     print(f"  Pending tasks: {len(pending_tasks)}")
@@ -211,6 +342,7 @@ def handle_schedule_queue(message):
         failed_tasks=failed_tasks,
         user_state=user_state,
         now=now,
+        efficiency_profile=efficiency_profile,
     )
 
     sections = result["sections"]
@@ -270,6 +402,21 @@ def handle_rl_feedback_queue(message):
 
         feedback=data.get("feedback", [])
     )
+
+    # FIX: rlProcessed was set to False by Node when feedback arrived, but
+    # nothing anywhere ever set it back to True — so it never actually did
+    # its intended job as an idempotency guard. Node must now include
+    # "session_id" in the payload (see feedback.service.js) so we know
+    # exactly which ScheduledSession document to mark as processed.
+    session_id = data.get("session_id")
+    if session_id:
+        db.scheduledsessions.update_one(
+            {"_id": ObjectId(session_id)},
+            {"$set": {"rlProcessed": True}}
+        )
+        print(f"  Marked session {session_id} as rlProcessed")
+    else:
+        print(f"  No session_id in payload — could not mark rlProcessed (likely the no-session fallback case)")
 
     print(f"  Q-tables updated successfully")
 

@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { getTodaySchedule, regenerateSchedule, completeTask, missTask, skipTask, submitFeedback } from '../services/api';
 import toast from 'react-hot-toast';
-import { Calendar, RefreshCw, Clock, CheckCircle, XCircle, SkipForward, TrendingUp, Award, Zap, ChevronLeft, ChevronRight, Brain, Trophy, Target } from 'lucide-react';
+import { Calendar, RefreshCw, Clock, CheckCircle, XCircle, SkipForward, TrendingUp, Award, Zap, ChevronLeft, ChevronRight, Brain, Trophy, Target, CalendarDays } from 'lucide-react';
 
 // Confetti Component
 function Confetti({ active }) {
@@ -73,7 +73,7 @@ function Confetti({ active }) {
 export default function SchedulePage() {
     const [schedule, setSchedule] = useState(null);
     const [loading, setLoading] = useState(true);
-    const [selectedDate, setSelectedDate] = useState(null);
+    const [selectedDate, setSelectedDate] = useState(new Date().toDateString());
     const [showFeedbackModal, setShowFeedbackModal] = useState(false);
     const [selectedTask, setSelectedTask] = useState(null);
     const [selectedAction, setSelectedAction] = useState(null);
@@ -84,6 +84,15 @@ export default function SchedulePage() {
         fatigueAfter: 5,
         feedbackCodes: []
     });
+
+    // FIX: the day-strip previously just started at its leftmost date
+    // (today - 30 days) with no auto-scroll, so "today" was invisible off
+    // to the right — making users click what LOOKED like the closest
+    // tab, not realizing it was a genuinely different, empty day.
+    const selectedTabRef = useRef(null);
+    useEffect(() => {
+        selectedTabRef.current?.scrollIntoView({ behavior: 'smooth', inline: 'center', block: 'nearest' });
+    }, [selectedDate]);
 
     useEffect(() => {
         fetchSchedule();
@@ -106,13 +115,6 @@ export default function SchedulePage() {
             });
 
             setSessionsByDate(sessionsByDateMap);
-
-            const datesWithSessions = Object.keys(sessionsByDateMap);
-            if (datesWithSessions.length > 0 && !selectedDate) {
-                setSelectedDate(datesWithSessions[0]);
-            } else if (!selectedDate) {
-                setSelectedDate(new Date().toDateString());
-            }
         } catch (error) {
             console.error('Failed to fetch schedule:', error);
         } finally {
@@ -186,6 +188,20 @@ export default function SchedulePage() {
         try {
             if (selectedAction === 'complete') {
                 await completeTask(selectedTask._id, parseInt(feedbackData.actualDuration));
+
+                // FIX: this branch never called submitFeedback for completions,
+                // so the RL system only ever learned from failures — the whole
+                // "reward successful completions too" half of the design
+                // (updater.py's BASE_REWARD.completed, the routing that accepts
+                // 'completed' outcomes) never actually fired in practice.
+                await submitFeedback({
+                    taskId: selectedTask._id,
+                    outcome: 'completed',
+                    actualDurationMin: parseInt(feedbackData.actualDuration),
+                    fatigueAfter: feedbackData.fatigueAfter,
+                    feedback: feedbackData.feedbackCodes,
+                });
+
                 toast.success('🎉 Task completed! Great job!');
                 setShowConfetti(true);
                 setTimeout(() => setShowConfetti(false), 2500);
@@ -331,6 +347,15 @@ export default function SchedulePage() {
                 <div className="card p-4 mb-6">
                     <div className="flex items-center justify-between">
                         <button
+                            onClick={() => setSelectedDate(new Date().toDateString())}
+                            className="p-2 rounded-lg hover:bg-[var(--bg-secondary)] transition-all flex items-center gap-1 text-sm text-[var(--accent)] font-medium whitespace-nowrap"
+                            title="Jump to today"
+                        >
+                            <CalendarDays className="w-4 h-4" />
+                            Today
+                        </button>
+
+                        <button
                             onClick={() => {
                                 const currentIndex = allDates.indexOf(selectedDate);
                                 if (currentIndex > 0) setSelectedDate(allDates[currentIndex - 1]);
@@ -351,6 +376,7 @@ export default function SchedulePage() {
                                 return (
                                     <button
                                         key={date}
+                                        ref={isSelected ? selectedTabRef : null}
                                         onClick={() => setSelectedDate(date)}
                                         className={`px-4 py-2 rounded-lg transition-all whitespace-nowrap ${isSelected
                                                 ? 'bg-[var(--accent)] text-white'
